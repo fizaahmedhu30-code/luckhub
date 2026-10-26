@@ -13,7 +13,7 @@ const userSchema = new mongoose.Schema({
   totalWithdraw: { type: Number, default: 0 },
   totalBets: { type: Number, default: 0 },
   totalWins: { type: Number, default: 0 },
-  currency: { type: String, default: 'PKR', enum: ['PKR', 'INR', 'USD'] },
+  currency: { type: String, default: 'BDT', enum: ['BDT', 'USD', 'PKR', 'INR'] },
   role: { type: String, default: 'user', enum: ['user', 'agent', 'admin'] },
   status: { type: String, default: 'active', enum: ['active', 'banned', 'pending'] },
   vipLevel: { type: Number, default: 0, min: 0, max: 10 },

@@ -14,7 +14,7 @@ router.post('/register', async (req, res) => {
         const existing = await User.findOne({ $or: [{ email }, { username }] });
         if (existing) return res.status(400).json({ message: 'Username or email already taken' });
 
-        const userData = { username, email, password, phone: phone || '', currency: currency || 'PKR' };
+        const userData = { username, email, password, phone: phone || '', currency: currency || 'BDT' };
 
         // Handle referral
         if (referralCode) {
@@ -26,7 +26,7 @@ router.post('/register', async (req, res) => {
 
         const user = await User.create(userData);
 
-        // Give welcome bonus
+        // Give welcome bonus in BDT
         user.balance = 100;
         await user.save();
 

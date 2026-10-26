@@ -20,11 +20,12 @@ router.get('/', async (req, res) => {
     }
 });
 
+// 1. SLOTS
 // POST /api/games/slots/spin
 router.post('/slots/spin', protect, async (req, res) => {
     try {
         const { betAmount } = req.body;
-        const amount = parseInt(betAmount) || 10;
+        const amount = Math.max(10, parseInt(betAmount) || 10);
         const user = await User.findById(req.user._id);
         if (user.balance < amount) return res.status(400).json({ message: 'Insufficient balance' });
         const gameConfig = await GameConfig.findOne({ slug: 'slots' });
@@ -48,9 +49,9 @@ router.post('/slots/spin', protect, async (req, res) => {
             finalReels = winCount === 3
                 ? [winSymbol, winSymbol, winSymbol]
                 : [winSymbol, winSymbol, symbols[Math.floor(Math.random() * symbols.length)]];
-            const payouts = { '💎': 50, '7️⃣': 20, '⭐': 10, '🔔': 8, '🍇': 5, '🍊': 4, '🍋': 3, '🍒': 2 };
+            const payouts = { '💎': 50, '7️⃣': 25, '⭐': 15, '🔔': 10, '🍇': 5, '🍊': 4, '🍋': 3, '🍒': 2 };
             multiplier = (payouts[winSymbol] || 2) * (winCount === 3 ? 1 : 0.5);
-            payout = amount * multiplier;
+            payout = Math.round(amount * multiplier);
         }
 
         const balanceBefore = user.balance;
@@ -72,17 +73,18 @@ router.post('/slots/spin', protect, async (req, res) => {
             balanceBefore, balanceAfter: user.balance
         });
 
-        res.json({ reels: finalReels, isWin, multiplier, payout, balance: user.balance, bet: bet._id });
+        res.json({ reels: finalReels, isWin, multiplier, payout, balance: user.balance, betId: bet._id });
     } catch (err) {
         res.status(500).json({ message: err.message });
     }
 });
 
+// 2. CRASH (Aviator)
 // POST /api/games/crash/start
 router.post('/crash/start', protect, async (req, res) => {
     try {
         const { betAmount } = req.body;
-        const amount = parseInt(betAmount) || 10;
+        const amount = Math.max(10, parseInt(betAmount) || 10);
         const user = await User.findById(req.user._id);
         if (user.balance < amount) return res.status(400).json({ message: 'Insufficient balance' });
         const gameConfig = await GameConfig.findOne({ slug: 'crash' });
@@ -92,9 +94,8 @@ router.post('/crash/start', protect, async (req, res) => {
         const e = 2 ** 32;
         const rand = Math.random() * e;
         let crashPoint = Math.floor(e / (e - rand) * 100) / 100;
-        // Apply house edge: occasionally force low crash
-        if (!houseRNG(rtp)) crashPoint = Math.max(1.0, crashPoint * 0.3);
-        crashPoint = Math.max(1.0, Math.min(crashPoint, 1000));
+        if (!houseRNG(rtp)) crashPoint = Math.max(1.0, crashPoint * 0.35);
+        crashPoint = Math.max(1.0, Math.min(crashPoint, 200));
 
         user.balance -= amount;
         user.totalBets += amount;
@@ -120,13 +121,14 @@ router.post('/crash/cashout', protect, async (req, res) => {
         if (!bet || bet.user.toString() !== req.user._id.toString()) return res.status(404).json({ message: 'Bet not found' });
         if (bet.result !== 'pending') return res.status(400).json({ message: 'Bet already settled' });
 
-        const crashPoint = bet.gameData.cashoutMultiplier || bet.gameData.crashPoint;
-        const isWin = cashoutMultiplier <= crashPoint;
-        const payout = isWin ? bet.amount * cashoutMultiplier : 0;
+        const crashPoint = bet.gameData.crashPoint;
+        const multiplier = parseFloat(cashoutMultiplier) || 1.0;
+        const isWin = multiplier <= crashPoint;
+        const payout = isWin ? Math.round(bet.amount * multiplier) : 0;
         const user = await User.findById(req.user._id);
 
         bet.result = isWin ? 'win' : 'lose';
-        bet.multiplier = cashoutMultiplier;
+        bet.multiplier = multiplier;
         bet.payout = payout;
         bet.balanceAfter = user.balance + payout;
         await bet.save();
@@ -141,30 +143,44 @@ router.post('/crash/cashout', protect, async (req, res) => {
     }
 });
 
+// 3. DICE
 // POST /api/games/dice/roll
 router.post('/dice/roll', protect, async (req, res) => {
     try {
         const { betAmount, prediction, target } = req.body;
-        const amount = parseInt(betAmount) || 10;
+        const amount = Math.max(10, parseInt(betAmount) || 10);
         const user = await User.findById(req.user._id);
         if (user.balance < amount) return res.status(400).json({ message: 'Insufficient balance' });
         const gameConfig = await GameConfig.findOne({ slug: 'dice' });
         const rtp = gameConfig?.rtp || 95;
 
+        const rollTarget = parseInt(target) || 50;
         const roll = Math.floor(Math.random() * 100) + 1;
         let isWin = false;
         let multiplier = 0;
 
-        if (prediction === 'over' && roll > target) { isWin = true; multiplier = parseFloat((97.5 / (100 - target)).toFixed(2)); }
-        else if (prediction === 'under' && roll < target) { isWin = true; multiplier = parseFloat((97.5 / target).toFixed(2)); }
+        if (prediction === 'over' && roll > rollTarget) {
+            isWin = true;
+            multiplier = parseFloat((98 / (100 - rollTarget)).toFixed(2));
+        } else if (prediction === 'under' && roll < rollTarget) {
+            isWin = true;
+            multiplier = parseFloat((98 / rollTarget).toFixed(2));
+        }
 
         if (!houseRNG(rtp)) { isWin = false; multiplier = 0; }
 
-        const payout = isWin ? amount * multiplier : 0;
+        const payout = isWin ? Math.round(amount * multiplier) : 0;
         user.balance = user.balance - amount + payout;
         user.totalBets += amount;
         if (payout > 0) user.totalWins += payout;
         await user.save();
+
+        await Bet.create({
+            user: user._id, game: 'dice', amount,
+            multiplier, result: isWin ? 'win' : 'lose', payout,
+            gameData: { roll, prediction, target: rollTarget },
+            balanceBefore: user.balance + amount - payout, balanceAfter: user.balance
+        });
 
         res.json({ roll, isWin, multiplier, payout, balance: user.balance });
     } catch (err) {
@@ -172,11 +188,12 @@ router.post('/dice/roll', protect, async (req, res) => {
     }
 });
 
+// 4. COLOR PREDICTION
 // POST /api/games/color/predict
 router.post('/color/predict', protect, async (req, res) => {
     try {
         const { betAmount, color } = req.body;
-        const amount = parseInt(betAmount) || 10;
+        const amount = Math.max(10, parseInt(betAmount) || 10);
         const user = await User.findById(req.user._id);
         if (user.balance < amount) return res.status(400).json({ message: 'Insufficient balance' });
         const gameConfig = await GameConfig.findOne({ slug: 'color' });
@@ -187,20 +204,158 @@ router.post('/color/predict', protect, async (req, res) => {
         let rand = Math.random() * 100;
         let result = 'red';
         let cumul = 0;
-        for (let i = 0; i < colors.length; i++) { cumul += weights[i]; if (rand < cumul) { result = colors[i]; break; } }
+        for (let i = 0; i < colors.length; i++) {
+            cumul += weights[i];
+            if (rand < cumul) { result = colors[i]; break; }
+        }
 
-        const multipliers = { red: 2, green: 2, violet: 10 };
-        let isWin = color === result;
+        const multipliers = { red: 2, green: 2, violet: 9 };
+        let isWin = (color === result);
         if (!houseRNG(rtp)) isWin = false;
 
         const multiplier = isWin ? multipliers[result] : 0;
-        const payout = isWin ? amount * multiplier : 0;
+        const payout = isWin ? Math.round(amount * multiplier) : 0;
         user.balance = user.balance - amount + payout;
         user.totalBets += amount;
         if (payout > 0) user.totalWins += payout;
         await user.save();
 
+        await Bet.create({
+            user: user._id, game: 'color', amount,
+            multiplier, result: isWin ? 'win' : 'lose', payout,
+            gameData: { predicted: color, resultColor: result },
+            balanceBefore: user.balance + amount - payout, balanceAfter: user.balance
+        });
+
         res.json({ result, isWin, multiplier, payout, balance: user.balance });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// 5. TEEN PATTI
+// POST /api/games/teen-patti/play
+router.post('/teen-patti/play', protect, async (req, res) => {
+    try {
+        const { betAmount } = req.body;
+        const amount = Math.max(20, parseInt(betAmount) || 20);
+        const user = await User.findById(req.user._id);
+        if (user.balance < amount) return res.status(400).json({ message: 'Insufficient balance' });
+        const gameConfig = await GameConfig.findOne({ slug: 'teen-patti' });
+        const rtp = gameConfig?.rtp || 95;
+
+        const ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A'];
+        const suits = ['♠', '♥', '♦', '♣'];
+        const getRandomCard = () => ({
+            rank: ranks[Math.floor(Math.random() * ranks.length)],
+            suit: suits[Math.floor(Math.random() * suits.length)]
+        });
+
+        const playerCards = [getRandomCard(), getRandomCard(), getRandomCard()];
+        const dealerCards = [getRandomCard(), getRandomCard(), getRandomCard()];
+
+        const isWin = houseRNG(rtp);
+        const multiplier = isWin ? 1.95 : 0;
+        const payout = isWin ? Math.round(amount * multiplier) : 0;
+
+        user.balance = user.balance - amount + payout;
+        user.totalBets += amount;
+        if (payout > 0) user.totalWins += payout;
+        await user.save();
+
+        await Bet.create({
+            user: user._id, game: 'teen-patti', amount,
+            multiplier, result: isWin ? 'win' : 'lose', payout,
+            gameData: { playerCards, dealerCards },
+            balanceBefore: user.balance + amount - payout, balanceAfter: user.balance
+        });
+
+        res.json({ playerCards, dealerCards, isWin, multiplier, payout, balance: user.balance });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// 6. RUMMY
+// POST /api/games/rummy/play
+router.post('/rummy/play', protect, async (req, res) => {
+    try {
+        const { betAmount } = req.body;
+        const amount = Math.max(20, parseInt(betAmount) || 20);
+        const user = await User.findById(req.user._id);
+        if (user.balance < amount) return res.status(400).json({ message: 'Insufficient balance' });
+        const gameConfig = await GameConfig.findOne({ slug: 'rummy' });
+        const rtp = gameConfig?.rtp || 95;
+
+        const isWin = houseRNG(rtp);
+        const multiplier = isWin ? 2.0 : 0;
+        const payout = isWin ? Math.round(amount * multiplier) : 0;
+
+        user.balance = user.balance - amount + payout;
+        user.totalBets += amount;
+        if (payout > 0) user.totalWins += payout;
+        await user.save();
+
+        await Bet.create({
+            user: user._id, game: 'rummy', amount,
+            multiplier, result: isWin ? 'win' : 'lose', payout,
+            gameData: { isWin },
+            balanceBefore: user.balance + amount - payout, balanceAfter: user.balance
+        });
+
+        res.json({ isWin, multiplier, payout, balance: user.balance });
+    } catch (err) {
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// 7. MEGA JACKPOT
+// POST /api/games/jackpot/spin
+router.post('/jackpot/spin', protect, async (req, res) => {
+    try {
+        const { betAmount } = req.body;
+        const amount = Math.max(50, parseInt(betAmount) || 50);
+        const user = await User.findById(req.user._id);
+        if (user.balance < amount) return res.status(400).json({ message: 'Insufficient balance' });
+        const gameConfig = await GameConfig.findOne({ slug: 'jackpot' });
+        const rtp = gameConfig?.rtp || 92;
+
+        const slices = [
+            { label: 'Try Again', mult: 0, weight: 45 },
+            { label: '2x BDT', mult: 2, weight: 25 },
+            { label: '5x BDT', mult: 5, weight: 15 },
+            { label: '10x BDT', mult: 10, weight: 9 },
+            { label: '50x BDT', mult: 50, weight: 5 },
+            { label: '🏆 MEGA JACKPOT', mult: 200, weight: 1 },
+        ];
+
+        let rand = Math.random() * 100;
+        let selectedSlice = slices[0];
+        let cumul = 0;
+        for (const s of slices) {
+            cumul += s.weight;
+            if (rand < cumul) { selectedSlice = s; break; }
+        }
+
+        let isWin = selectedSlice.mult > 0;
+        if (!houseRNG(rtp)) { isWin = false; selectedSlice = slices[0]; }
+
+        const multiplier = isWin ? selectedSlice.mult : 0;
+        const payout = isWin ? Math.round(amount * multiplier) : 0;
+
+        user.balance = user.balance - amount + payout;
+        user.totalBets += amount;
+        if (payout > 0) user.totalWins += payout;
+        await user.save();
+
+        await Bet.create({
+            user: user._id, game: 'jackpot', amount,
+            multiplier, result: isWin ? 'win' : 'lose', payout,
+            gameData: { slice: selectedSlice.label },
+            balanceBefore: user.balance + amount - payout, balanceAfter: user.balance
+        });
+
+        res.json({ slice: selectedSlice.label, isWin, multiplier, payout, balance: user.balance });
     } catch (err) {
         res.status(500).json({ message: err.message });
     }
